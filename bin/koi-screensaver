@@ -237,10 +237,10 @@ hypr_exec() {
   local command
   printf -v command '%q ' "$@"
   # A ]] would end Hyprland's Lua string early; go the quoted way instead.
-  if [[ $command != *']]'* ]] && hyprctl dispatch "hl.dsp.exec_cmd([[$command]])" >/dev/null 2>&1; then
+  if [[ $command != *']]'* ]] && hyprctl dispatch "hl.dsp.exec_cmd([[[workspace $workspace] $command]])" >/dev/null 2>&1; then
     return
   fi
-  hyprctl dispatch exec -- "bash -lc $(printf %q "$command")" >/dev/null
+  hyprctl dispatch exec -- "[workspace $workspace]" bash -lc $(printf %q "$command") >/dev/null
 }
 
 # Listen for the new window before opening it, so a fast terminal can't map
@@ -302,6 +302,10 @@ for m in $(hyprctl monitors -j | jq -r '.[] | .name'); do
     break
   fi
   hypr_focus_monitor "$m"
+  # Same per-monitor special workspace omarchy-launch-screensaver uses since
+  # Omarchy 4.5, so the stock "special:screensaver silent" rule does not park
+  # the window out of sight (where it is never focused and quits after 2s).
+  workspace="special:screensaver-$m"
   fps=$(fps_for "$m")
 
   case $terminal in
