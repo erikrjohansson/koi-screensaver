@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ejuro.koi-screensaver",
   "name": "Koi Screensaver",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "erikrjohansson",
   "license": "MIT",
   "description": "Koi as your screensaver: drifting under lily pads, or two of them circling one, coloured by your theme.",

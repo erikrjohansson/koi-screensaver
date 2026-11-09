@@ -230,18 +230,34 @@ fps_for() {
 }
 
 hypr_focus_monitor() {
+  safe_name "$1" || return 1
   hyprctl dispatch "hl.dsp.focus({ monitor = \"$1\" })" >/dev/null 2>&1 || hyprctl dispatch focusmonitor "$1" >/dev/null
 }
 
+hypr_cursor_visible() {
+  timeout 3 hyprctl eval 'hl.config({ cursor = { invisible = false } })' >/dev/null 2>&1 || timeout 3 hyprctl keyword cursor:invisible false >/dev/null
+}
+
+# Opens a command on $workspace. Workspace and monitor names end up inside
+# Hyprland's Lua and its [rule] prefix, so only plain names get this far (see
+# safe_name below).
 hypr_exec() {
-  local command
+  local command rule
   printf -v command '%q ' "$@"
+  command=${command% }
+  rule="[workspace $workspace] $command"
   # A ]] would end Hyprland's Lua string early; go the quoted way instead.
-  if [[ $command != *']]'* ]] && hyprctl dispatch "hl.dsp.exec_cmd([[[workspace $workspace] $command]])" >/dev/null 2>&1; then
+  if [[ $rule != *']]'* ]] && hyprctl dispatch "hl.dsp.exec_cmd([[$rule]])" >/dev/null 2>&1; then
     return
   fi
-  hyprctl dispatch exec -- "[workspace $workspace]" bash -lc $(printf %q "$command") >/dev/null
+  # One argument, so the quoting made above reaches bash -lc intact.
+  hyprctl dispatch exec -- "[workspace $workspace] bash -lc $(printf %q "$command")" >/dev/null
 }
+
+# Letters, digits and . _ - only (plus the special: prefix of a workspace):
+# nothing that could end a Lua string or Hyprland's [rule] early. Real
+# connector names (HDMI-A-1, DP-2, eDP-1) and the scratchpad all pass.
+safe_name() { [[ $1 =~ ^(special:)?[A-Za-z0-9._-]{1,64}$ ]]; }
 
 # Listen for the new window before opening it, so a fast terminal can't map
 # before we're watching. The listener must not hold the launch lock, and goes
@@ -289,7 +305,11 @@ wait_for_window() {
 }
 
 opened=0 stopped=""
-for m in $(hyprctl monitors -j | jq -r '.[] | .name'); do
+mapfile -t monitors < <(hyprctl monitors -j | jq -r '.[] | "\(.name) \(.specialWorkspace.name // "")"')
+for line in "${monitors[@]}"; do
+  read -r m special <<<"$line"
+  safe_name "$m" || continue
+  safe_name "$special" || special=""
   # Before each monitor: never over the lock screen, and not once you are
   # back.
   catch_up
@@ -305,7 +325,9 @@ for m in $(hyprctl monitors -j | jq -r '.[] | .name'); do
   # Same per-monitor special workspace omarchy-launch-screensaver uses since
   # Omarchy 4.5, so the stock "special:screensaver silent" rule does not park
   # the window out of sight (where it is never focused and quits after 2s).
-  workspace="special:screensaver-$m"
+  # A special workspace that is already showing, like the scratchpad, is
+  # shared instead, so it is still open afterwards.
+  workspace=${special:-special:screensaver-$m}
   fps=$(fps_for "$m")
 
   case $terminal in
@@ -337,6 +359,44 @@ catch_up
 ((dismissed)) && pkill -f "[${CLASS:0:1}]${CLASS:1}"
 
 hypr_focus_monitor "$focused"
+
+# Once the last koi window is gone, however it went, show the pointer again
+# and hand focus back. The koi do both themselves on a normal exit, but the
+# lock screen kills their terminals outright, which left the pointer hidden
+# (#1). And Hyprland focuses a monitor when its special workspace empties, so
+# with several monitors focus ended wherever the last koi closed. Like
+# omarchy-launch-screensaver, a detached watcher waits for that; the launcher
+# itself still returns straight away. It asks Hyprland once a second (as the
+# koi's own focus check does) rather than following its event stream, so a
+# dropped connection or a missed event can't fool or stall it; only a clear
+# "none of the koi windows it opened are left" counts (another screensaver
+# that shares the class is not ours to wait for), and if Hyprland stops
+# answering it leaves things as they are. It lets go of the launch lock.
+if ((opened > 0)); then
+  windows="${!ours[*]}"
+  (
+    trap - EXIT TERM HUP INT
+    exec {launch}>&- {events}<&-
+    failures=0
+    while sleep 1; do
+      count=$(timeout 3 hyprctl clients -j 2>/dev/null | KOI_WINDOWS=$windows jq '
+        (env.KOI_WINDOWS | split(" ")) as $ours
+        | map(select(.mapped and ((.address | ltrimstr("0x")) as $a | any($ours[]; . == $a)))) | length
+      ' 2>/dev/null)
+      if [[ $count == 0 ]]; then
+        hypr_cursor_visible
+        hypr_focus_monitor "$focused"
+        exit 0
+      elif [[ $count =~ ^[0-9]+$ ]]; then
+        failures=0
+      elif ((++failures >= 30)); then
+        exit 1
+      fi
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  disown
+fi
+
 if [[ $stopped == window ]] || { ((opened == 0)) && [[ -z $stopped ]]; }; then
   notify "Koi Screensaver couldn't open its window"
   exit 1
